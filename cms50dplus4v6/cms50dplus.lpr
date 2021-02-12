@@ -23,7 +23,9 @@ var
   scanPorts: boolean= false;
   i: integer;
 
+{$ifdef LCL }
 {$R *.res}
+{$endif LCL }
 
 begin
   for i := 1 to ParamCount() do

@@ -258,6 +258,9 @@ object CMS50DPlusForm: TCMS50DPlusForm
           item
             Marks.LabelBrush.Style = bsClear
             Minors = <>
+            Range.Max = 120
+            Range.UseMax = True
+            Range.UseMin = True
             Title.LabelFont.Orientation = 900
             Title.LabelBrush.Style = bsClear
           end        
@@ -305,6 +308,11 @@ object CMS50DPlusForm: TCMS50DPlusForm
         object Chart1LineSeries3: TLineSeries
           Title = 'Vis'
           LinePen.Color = clLime
+          LinePen.Width = 3
+        end
+        object Chart1LineSeries4: TLineSeries
+          Title = 'BPM'
+          LinePen.Color = clFuchsia
           LinePen.Width = 3
         end
       end
@@ -374,12 +382,19 @@ object CMS50DPlusForm: TCMS50DPlusForm
       object MenuItemRunStart: TMenuItem
         Caption = '&Start'
         Enabled = False
-        OnClick = MenuItemRunStartClick
+        OnClick = MenuItemRunLiveClick
       end
       object MenuItemRunStop: TMenuItem
         Caption = 'S&top'
         Enabled = False
         OnClick = MenuItemRunStopClick
+      end
+      object MenuItem5: TMenuItem
+        Caption = '-'
+      end
+      object MenuItemRunPlayback: TMenuItem
+        Caption = 'Playback'
+        OnClick = MenuItemRunPlaybackClick
       end
     end
     object MenuItemSetport: TMenuItem

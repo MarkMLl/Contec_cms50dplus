@@ -3,7 +3,7 @@
 unit ConsoleApp;
 
 (* This is the greater part of a console program which reads live data from a   *)
-(* Contec CMS50D pulse oximeter (firmware v4.6, 9-byte messages @115k) and      *)
+(* Contec CMS50D+ pulse oximeter (firmware v4.6, 9-byte messages @115k) and     *)
 (* sends it to stdout.                                          MarkMLl.        *)
 
 {$mode objfpc}{$H+}
@@ -14,6 +14,8 @@ uses
   Classes, SysUtils, Serial;
 
 type
+  TOperation= (opLive, opPlayback, opQuery, opQueryVendor, opQueryModel,
+                                                        opQueryDevice, opQueryInfo);
   TWriteLn= procedure(const s: string);
 
 (* GNU-mandated support for --version and --help.
@@ -24,12 +26,12 @@ procedure DoVersion(const projName: string);
 *)
 procedure DoHelp(const portName: string; portScan: boolean= false);
 
-(* This is the inner loop of the main function. If the second parameter is nil
+(* This is the inner loop of the main function. If the final parameter is nil
   then output each decoded line using WriteLn(), otherwise call the indicated
   writer procedure which will typically send the output to the GUI.
 *)
-function RunConsoleApp2(portHandle: TSerialHandle; var pleaseStop: boolean;
-                                        writer: TWriteLn= nil): integer;
+function RunConsoleApp2(portHandle: TSerialHandle; op: TOperation;
+                        var pleaseStop: boolean; writer: TWriteLn= nil): integer;
 
 (* Main function, return 0 if no error.
 *)
@@ -81,6 +83,10 @@ begin
   WriteLn();
   WriteLn('  --portScan     Extends --help output with device list (might be slow).');
   WriteLn();
+  WriteLn('  --playback     Recovers recorded rather than live data.');
+  WriteLn();
+  WriteLn('  --query        Get model identifier in place of live or playback data.');
+  WriteLn();
   WriteLn('  -F --format p  Output format for main value is defined by pattern p, which');
   WriteLn('                 is e.g. %5.2f to specify a total of five characters with two');
   WriteLn('                 digits after the decimal point. Alternatively use %x@yBzd or');
@@ -112,6 +118,9 @@ end { DoHelp } ;
 
 type
   byteArray= array of byte;
+
+var
+  lineCounter: integer= 0;
 
 
 operator + (const a: byteArray; const b: byte): byteArray;
@@ -218,7 +227,14 @@ begin
   if diagOutputFormat = '' then begin
     for i := 0 to SizeOf(rawBlock) div 16 do
       if i * 16 < l then begin
-        Write(LowerCase(IntToHex(I * 16, 4)), ' ');
+//        Write(LowerCase(IntToHex(I * 16, 4)), ' ');
+
+// HACK: We know that in the current case we're dealing with short records, so
+// it is more useful to emit a line number than a hex address.
+
+        lineCounter += 1;
+        Write(lineCounter:4, ' ');
+
         for j := 0 to 15 do
           if (i * 16) + j < l then
             Write(hex(rawBlock[(i * 16) + j]));
@@ -355,13 +371,13 @@ end { diagOutput } ;
 
 
 type
-  Tmessage= array[0..8] of byte;
+  Tmessage9= array[0..8] of byte;
 
 
 (* Output either as a data dump (format is @ by itself) or with C-style
   formatting applied to each byte or word.
 *)
-function outputFormattedRaw(message: TMessage; const formatString: string): boolean;
+function outputFormattedRaw(message: TMessage9; const formatString: string): boolean;
 
 begin
   result := true;
@@ -401,25 +417,85 @@ end { outputFormattedRescaled } ;
 (* If the format string contains an @ then process the raw buffer. Otherwise
   extract the main value (SpO2) and scale to a double, then format it.
 *)
-function outputFormatted(message: Tmessage; const formatString: string): boolean;
+function outputFormatted(message: Tmessage9; const formatString: string): boolean;
 
 var
   value: double;
 
 begin
-  if (formatString = '') or (Pos('@', formatString) > 0) then
-    result := outputFormattedRaw(message, formatString)
-  else begin
-    value := message[6];
-    result := outputFormattedRescaled(value, formatString)
-  end
+  if formatString = '%%%%%%%%' then
+    lineCounter := 0
+  else
+    if (formatString = '') or (Pos('@', formatString) > 0) then
+      result := outputFormattedRaw(message, formatString)
+    else begin
+      value := message[6];
+      result := outputFormattedRescaled(value, formatString)
+    end
 end { outputFormatted } ;
 
 
 (* Format a 9-byte message into text, using the scaling etc. provided by the
   meter.
 *)
-function autoFormatted(message: Tmessage; wrapUp: boolean= false): string;
+function autoFormattedPlayback(message: Tmessage9; wrapUp: boolean= false): string;
+
+(* Playback data looks something like                                           *)
+(*                                                                              *)
+(* 0 0f                 Sync, always 0x0f                                       *)
+(* 1 80                 Always 8x80                                             *)
+(* 2 0xe2 -> 0x62 98    First SpO2                                              *)
+(* 3 0xbf -> 0x3f 63    First pulse rate                                        *)
+(* 4 0xe2 -> 0x62 98    Second SpO2                                             *)
+(* 5 0xbf -> 0x3f 63    Second pulse rate                                       *)
+(* 6 0xe2 -> 0x62 98    Third SpO2                                              *)
+(* 7 0xbf -> 0x3f 63    Third pulse rate                                        *)
+(* 8 0x00               Padding                                                 *)
+
+var
+  secs, mins, hrs: integer;
+  scratch: string;
+
+begin
+  if (message[0] <> $0f) or (message[8] <> $00) then
+    exit('');                           (* Bad sync byte                        *)
+  secs := lineCounter * 3;
+  lineCounter += 1;
+  mins := secs div 60;
+  secs := secs mod 60;
+  hrs := mins div 60;
+  mins := mins mod 60;
+  result := Format('%02d:%02d:%02d', [hrs, mins, secs]);
+  result := ReplaceStr(result, ' ', '0'); (* Don't trust FPC to obey leading 0  *)
+  result += ' |';
+
+(* Pulse rate and SpO2 for three seconds.                                       *)
+
+  Str((message[3] and $7f):3, scratch);
+  result += scratch + '|';
+  Str((message[2] and $7f):3, scratch);
+  result += scratch + '|';
+
+  Str((message[5] and $7f):3, scratch);
+  result += scratch + '|';
+  Str((message[4] and $7f):3, scratch);
+  result += scratch + '|';
+
+  Str((message[7] and $7f):3, scratch);
+  result += scratch + '|';
+  Str((message[6] and $7f):3, scratch);
+  result += scratch + '|';
+  if wrapUp then
+    result += 'No reading'
+  else
+    result += 'OK'
+end { autoFormattedPlayback } ;
+
+
+(* Format a 9-byte message into text, using the scaling etc. provided by the
+  meter.
+*)
+function autoFormattedLive(message: Tmessage9; wrapUp: boolean= false): string;
 
 (* There's been at least three data formats: low-, medium- and high-speed as    *)
 (* described respectively at                                                    *)
@@ -431,7 +507,7 @@ function autoFormatted(message: Tmessage; wrapUp: boolean= false): string;
 (* I only have one a CMS50D+ with firmware v4.6, and am only supporting the     *)
 (* high-speed variant with live (not recorded) data i.e. the last of those.     *)
 (*                                                                              *)
-(* Data looks something like                                                    *)
+(* Live data looks something like                                               *)
 (*                                                                              *)
 (* 0 01                 Sync, always 0x01                                       *)
 (* 1 e0                 LSB 0 if OK, 1 if finger out                            *)
@@ -484,6 +560,21 @@ begin
       result += 'Finger out'
     else
       result += 'OK'
+end { autoFormattedLive } ;
+
+
+(* Format a 9-byte message into text, using the scaling etc. provided by the
+  meter.
+*)
+function autoFormatted(message: Tmessage9; wrapUp: boolean= false): string;
+
+begin
+  case message[0] of
+    $01: result := autoFormattedLive(message, wrapup);
+    $0f: result := autoFormattedPlayback(message, wrapup)
+  else
+    result := ''
+  end
 end { autoFormatted } ;
 
 
@@ -493,30 +584,154 @@ var
   onceOnly: boolean= false;
 
 
-(* This is the inner loop of the main function. If the second parameter is nil
+(* This is a cut-down variant of RunConsoleApp2() which doesn't loop and
+  doesn't close the port on completion. It is primarily used for trying to
+  query device characteristics, and as such outputs direct to the console.
+*)
+function runConsoleApp3(portHandle: TSerialHandle; op: TOperation): integer;
+
+const
+  QueryVendor: Tmessage9= ($7d, $81, $a9, $80, $80, $80, $80, $80, $80);
+  QueryModel: Tmessage9= ($7d, $81, $a8, $80, $80, $80, $80, $80, $80);
+  QueryDevice: Tmessage9= ($7d, $81, $aa, $80, $80, $80, $80, $80, $80);
+  QueryInfo: Tmessage9= ($7d, $81, $b0, $80, $80, $80, $80, $80, $80);
+
+type
+  Tmessage18= array[0..17] of byte;
+
+var
+  i, msgTop: integer;
+  message: Tmessage9;
+  response: Tmessage18;
+
+
+  procedure writeLnStripped(topByte: integer);
+
+  const
+    lowByte= 2;
+
+  var
+    i: integer;
+
+  begin
+    for i := lowByte to topByte do
+      case response[i] and $7f of
+        $20..$7e: Write(Chr(response[i] and $7f))
+      otherwise
+        Write(' ')
+      end;
+    WriteLn('"')
+  end { writeLnStripped } ;
+
+
+begin
+  case op of
+    opQueryVendor:  begin
+                      msgTop := 8;
+                      message := queryVendor
+                    end;
+    opQueryModel:   begin
+                      msgTop := 17;
+                      message := queryModel
+                    end;
+    opQueryDevice:  begin
+                       msgTop := 8;
+                       message := queryDevice
+                     end;
+    opQueryInfo:    begin
+                      msgTop := 8;
+                      message := queryInfo
+                    end
+  otherwise
+    exit(5)
+  end;
+  SerWrite(portHandle, message, 9);
+  if SerReadTimeout(portHandle, response[0], 5000) = 0 then
+    exit(3);                            (* Unresponsive                         *)
+  case op of
+    opQueryVendor: if response[0] <> $03 then
+                     exit(4);
+    opQueryModel:  if response[0] <> $02 then
+                     exit(4);
+    opQueryDevice: if response[0] <> $04 then
+                     exit(4);
+    opQueryInfo:   if response[0] <> $11 then
+                     exit(4)
+  otherwise
+    exit(4)
+  end;
+
+(* Anything that isn't a sync byte has been discarded. Read the remainder of    *)
+(* the message.                                                                 *)
+
+  for i := 1 to msgTop do
+    if SerReadTimeout(portHandle, response[i], 100) = 0 then
+      exit(4);
+  if debugLevel > 1 then begin
+    Write(stderr, '#');
+    for i := 0 to msgTop do
+      Write(stderr, ' ' + HexStr(response[i], 2));
+    WriteLn(stderr)
+  end;
+  case op of
+    opQueryVendor: Write('Vendor: "');
+    opQueryModel:  Write('Model:  "');
+    opQueryDevice: Write('Device: "');
+    opQueryInfo:   Write('Info:   "');
+  otherwise
+    exit(0)
+  end;
+  writeLnStripped(msgTop);
+  result := 0
+end { runConsoleApp3 } ;
+
+
+(* This is the inner loop of the main function. If the final parameter is nil
   then output each decoded line using WriteLn(), otherwise call the indicated
   writer procedure which will typically send the output to the GUI.
 *)
-function RunConsoleApp2(portHandle: TSerialHandle; var pleaseStop: boolean;
-                                        writer: TWriteLn= nil): integer;
+function RunConsoleApp2(portHandle: TSerialHandle; op: TOperation;
+                        var pleaseStop: boolean; writer: TWriteLn= nil): integer;
 
 const
-  start: Tmessage= ($7d, $81, $a1, $80, $80, $80, $80, $80, $80);
+  startLive: Tmessage9= ($7d, $81, $a1, $80, $80, $80, $80, $80, $80);
+  startPlayback: Tmessage9= ($7d, $81, $a6, $80, $80, $80, $80, $80, $80);
 
 var
-  i, lastI: integer;
+  i, lastI, msgTop: integer;
   waitingFirstSync: boolean;
   resync: jmp_buf;
-  message: Tmessage;
+  message: Tmessage9;
   scratch: string;
 
 begin
   try
     SerSetParams(portHandle, 115200, 8, NoneParity, 1, []);
-    message := start;
+    case op of
+      opLive:     begin
+                    msgTop := 8;
+                    message := startLive
+                  end;
+      opPlayback: begin
+                    msgTop := 7;
+                    message := startPlayback
+                  end;
+      opQuery:    begin
+                    result := runConsoleApp3(portHandle, opQueryVendor);
+                    result := runConsoleApp3(portHandle, opQueryModel);
+                    result := runConsoleApp3(portHandle, opQueryDevice);
+                    result := runConsoleApp3(portHandle, opQueryInfo);
+                    exit
+                  end
+    otherwise
+      exit(0)
+    end;
     lastI := SetJmp(resync);
     SerWrite(portHandle, message, 9);
     waitingFirstSync := true;
+    outputFormatted(message, '%%%%%%%%'); (* Initialise counters etc. as needed *)
+    if Assigned(writer) then
+      writer('%%%%%%%%');
     repeat
       i := -1;
 
@@ -545,30 +760,44 @@ begin
 (* start command.                                                               *)
 
       waitingFirstSync := false;
-      if message[0] <> $01 then
-        continue;
+      case op of
+        opLive:        if message[0] <> $01 then   (* 0x01 for live data, 0x0f for logged  *)
+                         continue;
+        opPlayback:    if message[0] <> $0f then
+                         continue
+      otherwise
+        halt
+      end;
 
 (* Anything that isn't a sync byte has been discarded. Read the remainder of    *)
 (* the message.                                                                 *)
 
-      for i := 1 to 8 do
+      for i := 1 to msgTop do
         if SerReadTimeout(portHandle, message[i], 100) = 0 then
           LongJmp(resync, i + 1);
       if debugLevel > 1 then begin
         Write(stderr, '#');
-        for i := 0 to 8 do
+        for i := 0 to msgTop do
           Write(stderr, ' ' + HexStr(message[i], 2));
         WriteLn(stderr)
       end;
+      if msgTop = 7 then
+        message[8] := $00;
+
+// TODO : Possibly replace the result of autoFormatted() with a stringlist
+// so that stored data (which arrives in three-second blocks) can be expanded to
+// three lines without issues. This would obviously have a knock-on effect to
+// the definition and implementation of the writer procedure etc.
+
       if Assigned(writer) then begin
-        scratch := autoFormatted(message);
+        scratch := autoFormatted(message); (* Looks at sync byte                *)
         if scratch = '' then
           exit(5);                      (* Format error                         *)
         writer(scratch)
       end else
 
-(* We have a 9-byte message. If there is an explicit format string then apply   *)
-(* it, otherwise just try to do the right thing.                                *)
+(* We have a 9- or 8-byte message. If there is an explicit format string then   *)
+(* apply it, otherwise just try to do the right thing.                          *)
 
         if formatString <> '' then
           if not outputFormatted(message, formatString) then
@@ -585,7 +814,7 @@ begin
     until pleaseStop { Dave }           (* Or signal from keyboard              *)
   finally
     if Assigned(writer) then begin
-      scratch := autoFormatted(message, true); (* New time plus last data      *)
+      scratch := autoFormatted(message, true); (* New time plus last data       *)
       writer(scratch)
     end;
     SerClose(portHandle)
@@ -601,6 +830,7 @@ function RunConsoleApp(portName: string): integer;
 var
   portHandle: TSerialHandle= InvalidSerialHandle;
   dontStop: boolean= false;
+  cmd: TOperation= opLive;
   i: integer;
   ports: TStringList;
 
@@ -614,6 +844,10 @@ begin
       '--ports',                        (* Used as --help modifier only         *)
       '--portscan',
       '--portsScan':  ;
+      '--playback',
+      '--download':   cmd := opPlayback;
+      '--info',
+      '--query':      cmd := opQuery;
       '--debug':      if i = ParamCount() then begin
                         WriteLn(stderr, 'Debug level has no parameter');
                         exit(9)         (* Missing debug level                  *)
@@ -680,7 +914,7 @@ begin
   end;
   if debugLevel > 0 then
     WriteLn(stderr, '# Using port ', portName);
-  result := RunConsoleApp2(portHandle, dontStop);
+  result := RunConsoleApp2(portHandle, cmd, dontStop);
   case result of
     3: WriteLn(stderr, 'No data waiting for sync byte');
     4: WriteLn(stderr, 'No data reading message');
@@ -693,4 +927,217 @@ end { RunConsoleApp };
 initialization
   Assert(SizeOf(smallint) = 2)
 end.
+
+
+{$ifdef uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu }
+
+Lots of people mention the live-data start command, usually without commenting
+on the 30-sec limit. The only place I've seen anything about the playback is
+
+https://github.com/grantzvolsky/cms-50d-plus-cli/blob/master/hack/download.py
+
+although plugging that string into Google gives me command lists at
+
+https://github.com/tobac/cms50ew/blob/master/cms50ew/cms50ew.py
+https://github.com/maka89/cms50ew_datadump/blob/master/cms50ew.py
+
+which look far more comprehensive. There's also documentation of the CMS50EW
+at https://github.com/vats28/Contec-CMS50EW/blob/master/Communication%20protocol%20of%20pulse%20oximeter%20V7.0.pdf
+but I don't know how reliable it is.
+
+Below is from USB capture, I'll look at the above presently.
+
+// The commands appear as URB_BULK out messages, I don't know whether there are
+// additional messages which manipulate the serial control lines.
+
+This sequence at start of connect to endpoint 0x02
+7d 81 a2 80 80 80 80 80 80
+7d 81 a7 80 80 80 80 80 80
+7d 81 a8 80 80 80 80 80 80
+7d 81 a9 80 80 80 80 80 80
+7d 81 aa 80 80 80 80 80 80
+7d 81 b0 80 80 80 80 80 80
+
+Response from 0x82
+0c 80
+
+Response from 0x82
+02 80 80 b5 b0 c4 a8 c1 a9
+02 81 ff ab a0 a0 a0 a0 a0
+03 80 a0 a0 a0 a0 a0 a0 a0
+04 80 f5 f3 e5 f2 a0 a0 a0
+0c 80 11 80 81 81 80 80 80
+80 80
+
+To 0x02
+7d 81 a7 80 80 80 80 80 80
+
+From 0x82
+0c 80
+
+To 0x02
+7d 81 a2 80 80 80 80 80 80
+
+From 0x82
+0c 80
+
+To 0x02
+7d 81 a0 80 80 80 80 80 80
+
+From 0x82
+06 80 80 87
+
+To 0x02
+7d 81 b0 80 80 80 80 80 80
+
+From 0x82
+11 80 81 81 80 80 80 80 80
+
+To 0x02
+7d 81 ac 80 80 80 80 80 80
+
+From 0x82
+0e 80 81
+
+To 0x02
+7d 81 b3 80 80 80 80 80 80
+
+From 0x82
+13 80 80 80 80 80 80 80 80
+14 80 80 80 80 80 80 80 80
+
+To 0x02
+7d 81 a8 80 80 80 80 80 80
+
+From 0x02
+02 80 80 b5 b0 c4 a8 c1 a9
+02 81 ff ab a0 a0 a0 a0 a0
+
+To 0x02
+7d 81 aa 80 80 80 80 80 80
+
+From 0x82
+04 80 f5 f3 e5 f2 a0 a0 a0
+
+To 0x02
+7d 81 a9 80 80 80 80 80 80
+
+From 0x82
+03 80 a0 a0 a0 a0 a0 a0 a0
+
+Request idling resonse?
+
+To 0x02
+7d 81 a1 80 80 80 80 80 80
+
+Idling responses.
+
+From 0x82
+01 e1 84 c0 90 80 80 ff ff
+01 e1 84 c0 90 80 80 ff ff
+01 e1 84 c0 90 80 80 ff ff
+...
+
+This is a fairly definite shutdown sequence. I've seen it sent as two messages
+with two 0c 08 responses.
+
+To 0x02: Shutdown?
+7d 81 a7 80 80 80 80 80 80
+7d 81 a2 80 80 80 80 80 80
+
+From 0x82
+0c 80
+
+Different session:
+
+To 0x02
+7d 81 af 80 80 80 80 80 80
+
+From 0x82
+01 e1 84 c0 90 80 80 ff ff
+
+To 0x02
+7d 81 a6 80 80 80 80 80 80
+
+From 0x82
+
+3232
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+
+3233
+0f 80 e2 c6 e2 c6 e2 c6
+0f 80 e2 c6 e2 c6 e2 c6
+0f 80 e2 c7 e2 c7 e2 c7
+0f 80 e2 c6 e2 c6 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+
+3237
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e2 c5 e2 c5 e2 c5
+0f 80 e1 c5 e1 c5 e1 c5
+0f 80 e1 c5 e1 c5 e1 c5
+0f 80 e1 c5 e1 c5 e1 c5
+
+...
+
+A further 150 blocks here.
+
+Program reports data was collected for 1 hour 2 mins.
+
+Each full block is 8 messages, hence total is (154 x 8) + 5 = 1237
+messages or 20 messages (i.e. readings logged) a minute.
+
+For 24 hours assuming no compression that would be 225Kb
+
+...
+
+3470
+0f 80 e2 c2 e2 c2 e2 c2
+0f 80 e2 c2 e2 c2 e2 c2
+0f 80 e2 c4 e2 c5 e2 c5
+0f 80 e2 c5 e2 c6 e2 c6
+0f 80 e2 c6 e2 c6 e2 c6
+0f 80 e2 c6 e2 c6 e2 c6
+0f 80 e2 c6 e2 c5 e2 c5
+0f 80 e1 c5 e1 c4 e1 c4
+
+3471
+0f 80 e1 c4 e1 c4 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+0f 80 80 80 80 80 80 80
+
+self.cmd_hello1 = b'\x7d\x81\xa7\x80\x80\x80\x80\x80\x80'
+self.cmd_hello2 = b'\x7d\x81\xa2\x80\x80\x80\x80\x80\x80'
+self.cmd_hello3 = b'\x7d\x81\xa0\x80\x80\x80\x80\x80\x80'
+self.cmd_session_hello = b'\x7d\x81\xad\x80\x80\x80\x80\x80\x80'
+self.cmd_get_session_count = b'\x7d\x81\xa3\x80\x80\x80\x80\x80\x80'
+self.cmd_get_session_time = b'\x7d\x81\xa5\x80\x80\x80\x80\x80\x80'
+self.cmd_get_session_duration = b'\x7d\x81\xa4\x80\x80\x80\x80\x80\x80'
+self.cmd_get_user_info = b'\x7d\x81\xab\x80\x80\x80\x80\x80\x80'
+self.cmd_get_session_data = b'\x7d\x81\xa6\x80\x80\x80\x80\x80\x80'
+self.cmd_get_deviceid = b'\x7d\x81\xaa\x80\x80\x80\x80\x80\x80'
+self.cmd_get_info = b'\x7d\x81\xb0\x80\x80\x80\x80\x80\x80'
+self.cmd_get_model = b'\x7d\x81\xa8\x80\x80\x80\x80\x80\x80'
+self.cmd_get_vendor = b'\x7d\x81\xa9\x80\x80\x80\x80\x80\x80'
+self.cmd_session_erase = b'\x7d\x81\xae\x80\x80\x80\x80\x80\x80'
+self.cmd_custom = b'\x7d\x81\xf5\x80\x80\x80\x80\x80\x80'
+self.cmd_session_stuff = b'\x7d\x81\xaf\x80\x80\x80\x80\x80\x80'
+self.cmd_get_live_data = b'\x7d\x81\xa1\x80\x80\x80\x80\x80\x80'
+
+{$endif }
 
