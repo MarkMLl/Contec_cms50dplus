@@ -1,4 +1,4 @@
-This is a fairly simple program which receives the data stream from a Contec CMS50D+ pulse oximeter (v4.6 firmware only) and outputs it to either the console or to a GUI as a sequence of decoded values. The data flow is determined by the instrument, but there will typically be 60 readings per second running for 30 seconds.
+This is a fairly simple program which receives the live or logged (recorded, hence "playback") data stream from a Contec CMS50D+ pulse oximeter (v4.6 firmware only) and outputs it to either the console or to a GUI as a sequence of decoded values. The data flow is determined by the instrument, but there will typically be 60 readings per second running for 30 seconds.
 
 This tries- usually successfully- to work out which USB/serial port is connected to the meter. Because this uses a lot of OS-specific stuff it is not anticipated that it will be easily portable to anything except Linux, but the remainder of the program should be more tolerant. If the port can't be determined automagically, then it must be specified explicitly (on the command line as the final parameter, or using the GUI menu).
 
