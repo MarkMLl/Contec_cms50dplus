@@ -239,7 +239,7 @@ end { TcommsThread.writerPlaybackShim } ;
 
 
 (* This is called by the datacomms loop in the datacomms thread to handle each
-  message containing three seconds worth of logged data, and passes the unpacked
+  message containing one seconds worth of logged data, and passes the unpacked
   data to the main (GUI) thread via Synchronize() and a shim procedure
   (immediately above).
 *)
@@ -263,33 +263,7 @@ begin
     spo2Bin := StrToFloat(spo2);
     bpm := Trim(ExtractWord(2, s, ['|']));
     bpmBin := StrToFloat(bpm);
-    extra := Trim(ExtractWord(8, s, ['|']));
-    CMS50DPlusForm.CommsThread.Synchronize(@CMS50DPlusForm.CommsThread.writerPlaybackShim);
-    secs := baseSecs + 1;
-    mins := secs div 60;
-    secs := secs mod 60;
-    hrs := mins div 60;
-    mins := mins mod 60;
-    time := Format('%02d:%02d:%02d', [hrs, mins, secs]);
-    time := ReplaceStr(time, ' ', '0'); (* Don't trust FPC to obey leading 0    *)
-    nowt := 0.0 + (baseSecs + 1) / SecsPerDay;
-    spo2 := Trim(ExtractWord(5, s, ['|']));
-    spo2Bin := StrToFloat(spo2);
-    bpm := Trim(ExtractWord(4, s, ['|']));
-    bpmBin := StrToFloat(bpm);
-    CMS50DPlusForm.CommsThread.Synchronize(@CMS50DPlusForm.CommsThread.writerPlaybackShim);
-    secs := baseSecs + 2;
-    mins := secs div 60;
-    secs := secs mod 60;
-    hrs := mins div 60;
-    mins := mins mod 60;
-    time := Format('%02d:%02d:%02d', [hrs, mins, secs]);
-    time := ReplaceStr(time, ' ', '0'); (* Don't trust FPC to obey leading 0    *)
-    nowt := 0.0 + (baseSecs + 2) / SecsPerDay;
-    spo2 := Trim(ExtractWord(7, s, ['|']));
-    spo2Bin := StrToFloat(spo2);
-    bpm := Trim(ExtractWord(6, s, ['|']));
-    bpmBin := StrToFloat(bpm);
+    extra := Trim(ExtractWord(4, s, ['|']));
     CMS50DPlusForm.CommsThread.Synchronize(@CMS50DPlusForm.CommsThread.writerPlaybackShim)
   end
 end { writerPlayback } ;

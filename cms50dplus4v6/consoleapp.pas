@@ -435,6 +435,72 @@ begin
 end { outputFormatted } ;
 
 
+(* Check that the first parameter is a time followed by six values and a text
+  string, return false if not. Split the parameter into three, advancing the
+  time on the 2nd and 3rd by a second.
+*)
+function splitPlayback(const s: string; out sec0, sec1, sec2: string): boolean;
+
+var
+  baseTime: string;
+  baseSecs, secs, mins, hrs: integer;
+
+
+  function occur(const s: string; c: char): integer; inline;
+
+  var
+    i: integer;
+
+  begin
+    result := 0;
+    for i := 1 to Length(s) do
+      if s[i] = c then
+        result += 1
+  end { occur } ;
+
+
+begin
+  if occur(s, '|') <> 7 then
+    exit(false);
+  baseTime := Trim(ExtractWord(1, s, ['|']));
+  if occur(baseTime, ':') <> 2 then
+    exit(false);
+  result := true;
+  try
+    hrs := StrToInt(Copy(baseTime, 1, 2));
+    mins := StrToInt(Copy(baseTime, 4, 2));
+    secs := StrToInt(Copy(baseTime, 7, 2));
+    baseSecs := secs + (mins * 60) + hrs * (24 * 60);
+    sec0 := baseTime + ' |';
+    sec0 += ExtractWord(2, s, ['|']) + '|';
+    sec0 += ExtractWord(3, s, ['|']) + '|';
+    sec0 += ExtractWord(8, s, ['|']);
+    secs := baseSecs + 1;
+    mins := secs div 60;
+    secs := secs mod 60;
+    hrs := mins div 60;
+    mins := mins mod 60;
+    sec1 := Format('%02d:%02d:%02d', [hrs, mins, secs]);
+    sec1 := ReplaceStr(sec1, ' ', '0') + ' |'; (* Don't trust FPC to obey leading 0 *)
+    sec1 += ExtractWord(4, s, ['|']) + '|';
+    sec1 += ExtractWord(5, s, ['|']) + '|';
+    sec1 += ExtractWord(8, s, ['|']);
+    secs := baseSecs + 2;
+    mins := secs div 60;
+    secs := secs mod 60;
+    hrs := mins div 60;
+    mins := mins mod 60;
+    sec2 := Format('%02d:%02d:%02d', [hrs, mins, secs]);
+    sec2 := ReplaceStr(sec2, ' ', '0') + ' |'; (* Don't trust FPC to obey leading 0 *)
+    sec2 += ExtractWord(6, s, ['|']) + '|';
+    sec2 += ExtractWord(7, s, ['|']) + '|';
+    sec2 += ExtractWord(8, s, ['|'])
+  except
+    result := false
+  end
+end { splitPlayback } ;
+
+
 (* Format a 9-byte message into text, using the scaling etc. provided by the
   meter.
 *)
@@ -702,7 +768,7 @@ var
   waitingFirstSync: boolean;
   resync: jmp_buf;
   message: Tmessage9;
-  scratch: string;
+  scratch, sec0, sec1, sec2: string;
 
 begin
   try
@@ -783,17 +849,20 @@ begin
       end;
       if msgTop = 7 then
         message[8] := $00;
-
-// TODO : Possibly replace the result of autoFormatted() with a stringlist
-// so that stored data (which arrives in three-second blocks) can be expanded to
-// three lines without issues. This would obviously have a knock-on effect to
-// the definition and implementation of the writer procedure etc.
-
       if Assigned(writer) then begin
         scratch := autoFormatted(message); (* Looks at sync byte                *)
         if scratch = '' then
           exit(5);                      (* Format error                         *)
-        writer(scratch)
+        case op of
+          opPlayback: if splitPlayback(scratch, sec0, sec1, sec2) then begin
+                        writer(sec0);
+                        writer(sec1);
+                        writer(sec2)
+                      end else
+                        exit(5)         (* Format error                         *)
+        otherwise
+          writer(scratch)
+        end
       end else
 
 (* We have a 9- or 8-byte message. If there is an explicit format string then   *)
@@ -807,7 +876,16 @@ begin
           scratch := autoFormatted(message);
           if scratch = '' then
             exit(5);                    (* Format error                         *)
-          WriteLn(scratch)
+          case op of
+            opPlayback: if splitPlayback(scratch, sec0, sec1, sec2) then begin
+                          WriteLn(sec0);
+                          WriteLn(sec1);
+                          WriteLn(sec2)
+                        end else
+                          exit(5)       (* Format error                         *)
+          otherwise
+            WriteLn(scratch)
+          end
         end;
       if onceOnly then                  (* Debugging option, -ve level          *)
         break
